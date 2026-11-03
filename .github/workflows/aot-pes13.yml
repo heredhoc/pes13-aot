@@ -1,0 +1,152 @@
+name: AOT PES13 (prueba de compilacion)
+
+on:
+  workflow_dispatch:
+    inputs:
+      opt:
+        description: 'Nivel de optimizacion (0-3)'
+        required: false
+        default: '0'
+      extra_flags:
+        description: 'Flags extra para wamrc'
+        required: false
+        default: "--enable-indirect-mode --disable-llvm-intrinsics --disable-llvm-lto --enable-llvm-passes='function(mem2reg,instcombine<no-verify-fixpoint>,simplifycfg)'"
+      wasm_url:
+        description: 'URL del wasm.br'
+        required: false
+        default: 'https://pes13.optijuegos.net/assets/pes13.wasm.br'
+      label:
+        description: 'Sufijo para nombres de archivos'
+        required: false
+        default: '-p13a'
+      wamr_tag:
+        description: 'Tag de WAMR'
+        required: false
+        default: 'WAMR-2.4.5'
+      llvm_version:
+        description: 'Version de LLVM de apt'
+        required: false
+        default: '18'
+
+jobs:
+  aot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    steps:
+      - name: Info del runner
+        run: |
+          nproc
+          free -h
+          df -h .
+
+      - name: Liberar disco y agregar swap grande
+        continue-on-error: true
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/share/swift || true
+          AV=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+          SZ=$(( ${AV:-0} - 8 ))
+          if [ "$SZ" -gt 50 ]; then SZ=50; fi
+          if [ "$SZ" -ge 8 ]; then
+            sudo fallocate -l ${SZ}G /swapfile2
+            sudo chmod 600 /swapfile2
+            sudo mkswap /swapfile2
+            sudo swapon /swapfile2
+          fi
+          df -h /
+          free -h
+          swapon --show
+
+      - name: Instalar dependencias
+        run: |
+          V="${{ inputs.llvm_version }}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "llvm-${V}-dev" cmake ninja-build build-essential \
+            zlib1g-dev libzstd-dev libedit-dev libxml2-dev wabt brotli
+
+      - name: Bajar y descomprimir wasm
+        run: |
+          curl -fsSL -o pes13.wasm.br "${{ inputs.wasm_url }}"
+          brotli -df pes13.wasm.br -o pes13.wasm
+          ls -l pes13.wasm.br pes13.wasm
+          head -c 8 pes13.wasm | od -An -tx1
+          sha256sum pes13.wasm
+          [ "$(stat -c %s pes13.wasm)" = 89614031 ] || echo "AVISO: tamano distinto al analizado (89614031)"
+          echo "WASM=pes13.wasm" >> "$GITHUB_ENV"
+
+      - name: Clonar WAMR y aplicar parche SIMD
+        run: |
+          git clone --depth 1 --branch "${{ inputs.wamr_tag }}" \
+            https://github.com/bytecodealliance/wasm-micro-runtime wamr
+          F=wamr/core/iwasm/compilation/simd/simd_conversions.c
+          for n in 166 168; do
+            sed -n "${n}p" "$F" | grep -q 'simd_saturate(comp_ctx, func_ctx, e_sat_i16x8' \
+              || { echo "La linea $n no es la esperada:"; sed -n "${n}p" "$F"; exit 1; }
+          done
+          sed -i '166s/e_sat_i16x8/itype/;168s/e_sat_i16x8/itype/' "$F"
+
+      - name: Compilar wamrc
+        run: |
+          V="${{ inputs.llvm_version }}"
+          mkdir -p wamr/core/deps/llvm/build
+          cmake -S wamr/wamr-compiler -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="/usr/lib/llvm-${V}/lib/cmake/llvm"
+          cmake --build build -j2
+          ls -l build/wamrc
+          echo "WAMRC=$PWD/build/wamrc" >> "$GITHUB_ENV"
+          "$PWD/build/wamrc" --help > wamrc_help.txt 2>&1 || true
+
+      - name: Compilar AOT (aarch64)
+        run: |
+          set -o pipefail
+          ( while true; do echo "$(date +%T) $(free -m | sed -n 2p) | $(free -m | sed -n 3p) | wamrc_rss_kb=$(ps -o rss= -C wamrc | head -1)" | tee -a mem.log; sleep 30; done ) &
+          MEMPID=$!
+          trap 'kill $MEMPID 2>/dev/null || true' EXIT
+          /usr/bin/time -v -o time.txt \
+            "$WAMRC" --target=aarch64 --opt-level=${{ inputs.opt }} ${{ inputs.extra_flags }} \
+            -o pes13-O${{ inputs.opt }}${{ inputs.label }}.aot "$WASM" 2>&1 | tee wamrc.log
+
+      - name: Resumen
+        if: always()
+        run: |
+          {
+            echo "## AOT PES13, opt ${{ inputs.opt }}"
+            echo '```'
+            ls -l *.aot 2>/dev/null || echo "sin .aot generado"
+            grep -E "Elapsed|Maximum resident" time.txt 2>/dev/null || true
+            echo "Call parameter: $(grep -c 'Call parameter type' wamrc.log 2>/dev/null || echo n/a)"
+            echo "DestTy too big: $(grep -c 'DestTy too big' wamrc.log 2>/dev/null || echo n/a)"
+            grep -iE 'error|fail|unsupported|not support' wamrc.log 2>/dev/null | head -20 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-pes13-O${{ inputs.opt }}${{ inputs.label }}
+          path: |
+            wamrc.log
+            wamrc_help.txt
+            mem.log
+            time.txt
+          retention-days: 5
+          if-no-files-found: ignore
+
+      - name: Comprimir .aot
+        if: success()
+        run: |
+          ls -l pes13-O${{ inputs.opt }}${{ inputs.label }}.aot
+          xz -T2 -6 -k pes13-O${{ inputs.opt }}${{ inputs.label }}.aot
+          ls -l pes13-O${{ inputs.opt }}${{ inputs.label }}.aot.xz
+
+      - name: Subir .aot
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aot-pes13-O${{ inputs.opt }}${{ inputs.label }}
+          path: pes13-O${{ inputs.opt }}${{ inputs.label }}.aot.xz
+          compression-level: 0
+          retention-days: 3
