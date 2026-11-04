@@ -1,4 +1,4 @@
-name: AOT PES13 (prueba de compilacion, sin EH)
+name: AOT PES13 completo (sin subir .aot)
 
 on:
   workflow_dispatch:
@@ -140,18 +140,8 @@ jobs:
           retention-days: 5
           if-no-files-found: ignore
 
-      - name: Comprimir .aot
+      - name: Tamano del .aot (no se sube, repo publico)
         if: success()
         run: |
-          ls -l pes13-O${{ inputs.opt }}${{ inputs.label }}.aot
-          xz -T2 -6 -k pes13-O${{ inputs.opt }}${{ inputs.label }}.aot
-          ls -l pes13-O${{ inputs.opt }}${{ inputs.label }}.aot.xz
-
-      - name: Subir .aot
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: aot-pes13-O${{ inputs.opt }}${{ inputs.label }}
-          path: pes13-O${{ inputs.opt }}${{ inputs.label }}.aot.xz
-          compression-level: 0
-          retention-days: 3
+          ls -l *.aot
+          df -h /
