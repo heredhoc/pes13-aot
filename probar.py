@@ -5,7 +5,7 @@ import os, sys, time, shlex, subprocess
 wasm, name = sys.argv[1], sys.argv[2]; gdb = '--gdb' in sys.argv
 WAMRC = os.environ.get('WAMRC', 'wamrc'); FLAGS = shlex.split(os.environ.get('FLAGS', ''))
 LIM = int(os.environ.get('LIM_KB', str(10 * 1024 * 1024)))
-cmd = ['timeout', '-k', '10', '10m', WAMRC, '--target=aarch64', '--opt-level=0'] + FLAGS + ['-o', f'{name}.aot', wasm]
+cmd = ['timeout', '-k', '10', os.environ.get('TMO', '10m'), WAMRC, '--target=aarch64', '--opt-level=0'] + FLAGS + ['-o', f'{name}.aot', wasm]
 print('CMD', ' '.join(shlex.quote(c) for c in cmd), flush=True)
 lg = open(f'wamrc_{name}.log', 'w'); t = time.time()
 p = subprocess.Popen(cmd, stdout=lg, stderr=subprocess.STDOUT)
@@ -28,5 +28,6 @@ while p.poll() is None:
     if r > LIM and not blown:
         blown = True; subprocess.run(['kill', '-9', pid])
 size = os.path.getsize(f'{name}.aot') if os.path.exists(f'{name}.aot') else 0
+if os.path.exists(f'{name}.aot'): os.remove(f'{name}.aot')   # el .aot NO se sube (repo publico)
 line = f'RESULT {name}: {"CORTADO por RAM" if blown else "ok" if p.returncode == 0 else "rc=%s" % p.returncode} rc={p.returncode} pico={peak//1024} MB tiempo={time.time()-t:.0f}s aot={size} B'
 print(line); open(f'resultado_{name}.txt', 'w').write(line + '\n' + subprocess.run(['tail', '-5', f'wamrc_{name}.log'], capture_output=True, text=True).stdout)
