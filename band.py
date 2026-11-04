@@ -116,10 +116,16 @@ def main():
     elif sys.argv[1] == 'ranges':
         d, secs, (hdr, pay, end), funcs = load(sys.argv[2])
         rg = [tuple(float(x) for x in r.split('-')) for r in sys.argv[4].split(',')]
+        excl = set()
+        if len(sys.argv) > 6 and sys.argv[5] == '--exclude-dir':
+            import glob, json
+            for fn in glob.glob(sys.argv[6] + '/bad_*.json'):
+                excl |= set(json.load(open(fn))['ids'])
+            print(f'excluidas (vaciadas): {len(excl)} funciones')
         STUB = wleb(3) + b'\x00\x00\x0b'
         parts = [wleb(len(funcs))]; kept = kb = 0
         for i, (s_, e, fsz, nl) in enumerate(funcs):
-            k = any(lo * 10 <= bucket(i) < hi * 10 for lo, hi in rg)
+            k = i not in excl and any(lo * 10 <= bucket(i) < hi * 10 for lo, hi in rg)
             parts.append(d[s_:e] if k else STUB); kept += k; kb += fsz if k else 0
         newpay = b''.join(parts)
         open(sys.argv[3], 'wb').write(d[:hdr] + bytes([10]) + wleb(len(newpay)) + newpay + d[end:])

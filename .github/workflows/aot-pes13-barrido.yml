@@ -1,0 +1,219 @@
+name: AOT PES13 barrido de funciones malas a -O0 (r)
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra_flags:
+        description: 'Flags base para wamrc'
+        required: false
+        default: "--enable-indirect-mode --disable-llvm-intrinsics --disable-llvm-lto --enable-llvm-passes='function(mem2reg,instcombine<no-verify-fixpoint>,simplifycfg)'"
+      func_idx:
+        description: 'Indice de funcion (seccion Code) a aislar'
+        required: false
+        default: '24070'
+      func_name:
+        description: 'Nombre de la funcion'
+        required: false
+        default: 'L_01169990'
+      wasm_url:
+        description: 'URL del wasm.br'
+        required: false
+        default: 'https://pes13.optijuegos.net/assets/pes13.wasm.br'
+      wamr_tag:
+        description: 'Tag de WAMR'
+        required: false
+        default: 'WAMR-2.4.5'
+      llvm_version:
+        description: 'Version de LLVM de apt'
+        required: false
+        default: '18'
+
+jobs:
+  barrido:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 140
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { lo: 0, hi: 4 }
+          - { lo: 4, hi: 8 }
+          - { lo: 8, hi: 12 }
+          - { lo: 12, hi: 16 }
+          - { lo: 16, hi: 20 }
+          - { lo: 20, hi: 24 }
+          - { lo: 24, hi: 28 }
+          - { lo: 28, hi: 32 }
+          - { lo: 32, hi: 36 }
+          - { lo: 36, hi: 40 }
+          - { lo: 40, hi: 44 }
+          - { lo: 44, hi: 48 }
+          - { lo: 48, hi: 52 }
+          - { lo: 52, hi: 56 }
+          - { lo: 56, hi: 60 }
+          - { lo: 60, hi: 64 }
+          - { lo: 64, hi: 68 }
+          - { lo: 68, hi: 72 }
+          - { lo: 72, hi: 76 }
+          - { lo: 76, hi: 80 }
+          - { lo: 80, hi: 84 }
+          - { lo: 84, hi: 88 }
+          - { lo: 88, hi: 92 }
+          - { lo: 92, hi: 96 }
+          - { lo: 96, hi: 100 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Info del runner
+        run: |
+          nproc
+          free -h
+          df -h .
+
+      - name: Instalar dependencias
+        run: |
+          V="${{ inputs.llvm_version }}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "llvm-${V}-dev" cmake ninja-build build-essential \
+            zlib1g-dev libzstd-dev libedit-dev libxml2-dev wabt brotli gdb
+
+      - name: Bajar y descomprimir wasm
+        run: |
+          curl -fsSL -o pes13.wasm.br "${{ inputs.wasm_url }}"
+          brotli -df pes13.wasm.br -o pes13.wasm
+          [ "$(stat -c %s pes13.wasm)" = 89614031 ] || echo "AVISO: tamano distinto al analizado (89614031)"
+          python3 patch_eh.py pes13.wasm pes13_noeh.wasm
+          ls -l pes13_noeh.wasm
+
+      - name: Clonar WAMR y aplicar parche SIMD
+        run: |
+          git clone --depth 1 --branch "${{ inputs.wamr_tag }}" \
+            https://github.com/bytecodealliance/wasm-micro-runtime wamr
+          F=wamr/core/iwasm/compilation/simd/simd_conversions.c
+          for n in 166 168; do
+            sed -n "${n}p" "$F" | grep -q 'simd_saturate(comp_ctx, func_ctx, e_sat_i16x8' \
+              || { echo "La linea $n no es la esperada:"; sed -n "${n}p" "$F"; exit 1; }
+          done
+          sed -i '166s/e_sat_i16x8/itype/;168s/e_sat_i16x8/itype/' "$F"
+
+      - name: Compilar wamrc
+        run: |
+          V="${{ inputs.llvm_version }}"
+          mkdir -p wamr/core/deps/llvm/build
+          cmake -S wamr/wamr-compiler -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="/usr/lib/llvm-${V}/lib/cmake/llvm"
+          cmake --build build -j2
+          echo "WAMRC=$PWD/build/wamrc" >> "$GITHUB_ENV"
+          "$PWD/build/wamrc" --help > wamrc_help.txt 2>&1 || true
+
+      - name: Barrido ddmin de la banda (corte 10 GB, tope 12 min por prueba)
+        timeout-minutes: 120
+        run: |
+          export WAMRC_FLAGS="${{ inputs.extra_flags }}" LIM_KB=$(( 10 * 1024 * 1024 )) BUDGET_MIN=100
+          set +e
+          python3 -u ddsweep.py pes13_noeh.wasm ${{ matrix.lo }} ${{ matrix.hi }} 2>&1 | tee ddsweep_stdout.txt
+          set -e
+          cat result_*.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Subir resultado
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bad-${{ matrix.lo }}
+          path: |
+            bad_*.json
+            result_*.txt
+            bisect_*.log
+          retention-days: 5
+          if-no-files-found: ignore
+
+  completo:
+    needs: barrido
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 200
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: o0-50,  pct: 50 }
+          - { name: o0-75,  pct: 75 }
+          - { name: o0-100, pct: 100 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Info del runner
+        run: |
+          nproc
+          free -h
+          df -h .
+
+      - name: Instalar dependencias
+        run: |
+          V="${{ inputs.llvm_version }}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "llvm-${V}-dev" cmake ninja-build build-essential \
+            zlib1g-dev libzstd-dev libedit-dev libxml2-dev wabt brotli gdb
+
+      - name: Bajar y descomprimir wasm
+        run: |
+          curl -fsSL -o pes13.wasm.br "${{ inputs.wasm_url }}"
+          brotli -df pes13.wasm.br -o pes13.wasm
+          [ "$(stat -c %s pes13.wasm)" = 89614031 ] || echo "AVISO: tamano distinto al analizado (89614031)"
+          python3 patch_eh.py pes13.wasm pes13_noeh.wasm
+          ls -l pes13_noeh.wasm
+
+      - name: Clonar WAMR y aplicar parche SIMD
+        run: |
+          git clone --depth 1 --branch "${{ inputs.wamr_tag }}" \
+            https://github.com/bytecodealliance/wasm-micro-runtime wamr
+          F=wamr/core/iwasm/compilation/simd/simd_conversions.c
+          for n in 166 168; do
+            sed -n "${n}p" "$F" | grep -q 'simd_saturate(comp_ctx, func_ctx, e_sat_i16x8' \
+              || { echo "La linea $n no es la esperada:"; sed -n "${n}p" "$F"; exit 1; }
+          done
+          sed -i '166s/e_sat_i16x8/itype/;168s/e_sat_i16x8/itype/' "$F"
+
+      - name: Compilar wamrc
+        run: |
+          V="${{ inputs.llvm_version }}"
+          mkdir -p wamr/core/deps/llvm/build
+          cmake -S wamr/wamr-compiler -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="/usr/lib/llvm-${V}/lib/cmake/llvm"
+          cmake --build build -j2
+          echo "WAMRC=$PWD/build/wamrc" >> "$GITHUB_ENV"
+          "$PWD/build/wamrc" --help > wamrc_help.txt 2>&1 || true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bad-*
+          path: bad
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Compilar a -O0 SIN las funciones malas (corte 14 GB, tope 160 min)
+        timeout-minutes: 170
+        run: |
+          N="${{ matrix.name }}"; P="${{ matrix.pct }}"
+          mkdir -p bad; ls bad | head -40
+          python3 band.py ranges pes13_noeh.wasm muestra.wasm "0-$P" --exclude-dir bad | tee "info_$N.txt"
+          export FLAGS="${{ inputs.extra_flags }}" LIM_KB=$(( 14 * 1024 * 1024 )) TMO=160m
+          python3 -u probar.py muestra.wasm "$N" --gdb
+          cat "info_$N.txt" "resultado_$N.txt" >> "$GITHUB_STEP_SUMMARY"
+          free -h
+
+      - name: Subir logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: medir-r-${{ matrix.name }}
+          path: |
+            resultado_*.txt
+            info_*.txt
+            wamrc_*.log
+            gdb_*.txt
+            help_grep.txt
+          retention-days: 5
+          if-no-files-found: ignore
