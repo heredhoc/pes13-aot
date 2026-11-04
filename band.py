@@ -83,47 +83,51 @@ def names(d, secs, nimp):
 def bucket(i): return (i * 2654435761) % 1000
 def band(funcs, base, hi):
     return [i for i in range(len(funcs)) if base * 10 <= bucket(i) < hi * 10]
-if sys.argv[1] == 'info':
-    d, secs, code, funcs = load(sys.argv[2])
-    base = float(sys.argv[3]) if len(sys.argv) > 3 else 24
-    hi = float(sys.argv[4]) if len(sys.argv) > 4 else 28
-    nm = names(d, secs, nimports(d, secs))
-    print(f'funciones: {len(funcs)}; con nombre: {len(nm)}')
-    print('--- 25 funciones mas grandes de TODO el wasm (idx, bytes, locales, bucket, nombre)')
-    for i in sorted(range(len(funcs)), key=lambda i: -funcs[i][2])[:25]:
-        print(i, funcs[i][2], funcs[i][3], bucket(i), nm.get(i, '-'))
-    bd = band(funcs, base, hi)
-    print(f'--- banda {base}-{hi} %: {len(bd)} funciones, {sum(funcs[i][2] for i in bd)} bytes; las 25 mas grandes')
-    for i in sorted(bd, key=lambda i: -funcs[i][2])[:25]:
-        print(i, funcs[i][2], funcs[i][3], bucket(i), nm.get(i, '-'))
-    print('--- por franja de 4 %: funciones, bytes, mayor funcion')
-    for lo in range(0, 100, 4):
-        ids = band(funcs, lo, lo + 4)
-        if ids: print(f'{lo}-{lo+4}: {len(ids)} {sum(funcs[i][2] for i in ids)} max={max(funcs[i][2] for i in ids)}')
-elif sys.argv[1] == 'ranges':
-    d, secs, (hdr, pay, end), funcs = load(sys.argv[2])
-    rg = [tuple(float(x) for x in r.split('-')) for r in sys.argv[4].split(',')]
-    STUB = wleb(3) + b'\x00\x00\x0b'
-    parts = [wleb(len(funcs))]; kept = kb = 0
-    for i, (s_, e, fsz, nl) in enumerate(funcs):
-        k = any(lo * 10 <= bucket(i) < hi * 10 for lo, hi in rg)
-        parts.append(d[s_:e] if k else STUB); kept += k; kb += fsz if k else 0
-    newpay = b''.join(parts)
-    open(sys.argv[3], 'wb').write(d[:hdr] + bytes([10]) + wleb(len(newpay)) + newpay + d[end:])
-    print(f'rangos {sys.argv[4]}: funciones {kept}/{len(funcs)}, bytes de codigo {kb}')
-else:
-    d, secs, (hdr, pay, end), funcs = load(sys.argv[2])
-    dst, base, hi, mode = sys.argv[3], float(sys.argv[4]), float(sys.argv[5]), sys.argv[6]
-    kind, n = mode.split(':'); n = int(n)
-    bd = band(funcs, base, hi)
-    big = set(sorted(bd, key=lambda i: -funcs[i][2])[:n])
-    STUB = wleb(3) + b'\x00\x00\x0b'
-    parts = [wleb(len(funcs))]; kept = 0
-    for i, (s, e, fsz, nl) in enumerate(funcs):
-        inbase = bucket(i) < base * 10
-        inband = base * 10 <= bucket(i) < hi * 10
-        keep = inbase or (inband and ((i in big) if kind == 'top' else (i not in big)))
-        parts.append(d[s:e] if keep else STUB); kept += keep
-    newpay = b''.join(parts)
-    open(dst, 'wb').write(d[:hdr] + bytes([10]) + wleb(len(newpay)) + newpay + d[end:])
-    print(f'{mode} base={base} banda={hi}: funciones {kept}/{len(funcs)}; grandes aislados: {sorted(big)}')
+def main():
+    if sys.argv[1] == 'info':
+        d, secs, code, funcs = load(sys.argv[2])
+        base = float(sys.argv[3]) if len(sys.argv) > 3 else 24
+        hi = float(sys.argv[4]) if len(sys.argv) > 4 else 28
+        nm = names(d, secs, nimports(d, secs))
+        print(f'funciones: {len(funcs)}; con nombre: {len(nm)}')
+        print('--- 25 funciones mas grandes de TODO el wasm (idx, bytes, locales, bucket, nombre)')
+        for i in sorted(range(len(funcs)), key=lambda i: -funcs[i][2])[:25]:
+            print(i, funcs[i][2], funcs[i][3], bucket(i), nm.get(i, '-'))
+        bd = band(funcs, base, hi)
+        print(f'--- banda {base}-{hi} %: {len(bd)} funciones, {sum(funcs[i][2] for i in bd)} bytes; las 25 mas grandes')
+        for i in sorted(bd, key=lambda i: -funcs[i][2])[:25]:
+            print(i, funcs[i][2], funcs[i][3], bucket(i), nm.get(i, '-'))
+        print('--- por franja de 4 %: funciones, bytes, mayor funcion')
+        for lo in range(0, 100, 4):
+            ids = band(funcs, lo, lo + 4)
+            if ids: print(f'{lo}-{lo+4}: {len(ids)} {sum(funcs[i][2] for i in ids)} max={max(funcs[i][2] for i in ids)}')
+    elif sys.argv[1] == 'ranges':
+        d, secs, (hdr, pay, end), funcs = load(sys.argv[2])
+        rg = [tuple(float(x) for x in r.split('-')) for r in sys.argv[4].split(',')]
+        STUB = wleb(3) + b'\x00\x00\x0b'
+        parts = [wleb(len(funcs))]; kept = kb = 0
+        for i, (s_, e, fsz, nl) in enumerate(funcs):
+            k = any(lo * 10 <= bucket(i) < hi * 10 for lo, hi in rg)
+            parts.append(d[s_:e] if k else STUB); kept += k; kb += fsz if k else 0
+        newpay = b''.join(parts)
+        open(sys.argv[3], 'wb').write(d[:hdr] + bytes([10]) + wleb(len(newpay)) + newpay + d[end:])
+        print(f'rangos {sys.argv[4]}: funciones {kept}/{len(funcs)}, bytes de codigo {kb}')
+    else:
+        d, secs, (hdr, pay, end), funcs = load(sys.argv[2])
+        dst, base, hi, mode = sys.argv[3], float(sys.argv[4]), float(sys.argv[5]), sys.argv[6]
+        kind, n = mode.split(':'); n = int(n)
+        bd = band(funcs, base, hi)
+        big = set(sorted(bd, key=lambda i: -funcs[i][2])[:n])
+        STUB = wleb(3) + b'\x00\x00\x0b'
+        parts = [wleb(len(funcs))]; kept = 0
+        for i, (s, e, fsz, nl) in enumerate(funcs):
+            inbase = bucket(i) < base * 10
+            inband = base * 10 <= bucket(i) < hi * 10
+            keep = inbase or (inband and ((i in big) if kind == 'top' else (i not in big)))
+            parts.append(d[s:e] if keep else STUB); kept += keep
+        newpay = b''.join(parts)
+        open(dst, 'wb').write(d[:hdr] + bytes([10]) + wleb(len(newpay)) + newpay + d[end:])
+        print(f'{mode} base={base} banda={hi}: funciones {kept}/{len(funcs)}; grandes aislados: {sorted(big)}')
+
+if __name__ == '__main__':
+    main()
