@@ -1,0 +1,140 @@
+name: AOT PES13 bisecar (j)
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra_flags:
+        description: 'Flags base para wamrc'
+        required: false
+        default: "--enable-indirect-mode --disable-llvm-intrinsics --disable-llvm-lto --enable-llvm-passes='function(mem2reg,instcombine<no-verify-fixpoint>,simplifycfg)'"
+      wasm_url:
+        description: 'URL del wasm.br'
+        required: false
+        default: 'https://pes13.optijuegos.net/assets/pes13.wasm.br'
+      wamr_tag:
+        description: 'Tag de WAMR'
+        required: false
+        default: 'WAMR-2.4.5'
+      llvm_version:
+        description: 'Version de LLVM de apt'
+        required: false
+        default: '18'
+
+jobs:
+  medir:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: p20,        pct: 20, extra: "" }
+          - { name: p24,        pct: 24, extra: "" }
+          - { name: p28,        pct: 28, extra: "" }
+          - { name: f16-base,   pct: 16, extra: "" }
+          - { name: f16-jt,     pct: 16, extra: "--disable-llvm-jump-tables" }
+          - { name: f16-aux,    pct: 16, extra: "--disable-aux-stack-check" }
+          - { name: f16-jt-aux, pct: 16, extra: "--disable-llvm-jump-tables --disable-aux-stack-check" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Info del runner
+        run: |
+          nproc
+          free -h
+          df -h .
+
+      - name: Instalar dependencias
+        run: |
+          V="${{ inputs.llvm_version }}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "llvm-${V}-dev" cmake ninja-build build-essential \
+            zlib1g-dev libzstd-dev libedit-dev libxml2-dev wabt brotli
+
+      - name: Bajar y descomprimir wasm
+        run: |
+          curl -fsSL -o pes13.wasm.br "${{ inputs.wasm_url }}"
+          brotli -df pes13.wasm.br -o pes13.wasm
+          [ "$(stat -c %s pes13.wasm)" = 89614031 ] || echo "AVISO: tamano distinto al analizado (89614031)"
+          python3 patch_eh.py pes13.wasm pes13_noeh.wasm
+          ls -l pes13_noeh.wasm
+
+      - name: Clonar WAMR y aplicar parche SIMD
+        run: |
+          git clone --depth 1 --branch "${{ inputs.wamr_tag }}" \
+            https://github.com/bytecodealliance/wasm-micro-runtime wamr
+          F=wamr/core/iwasm/compilation/simd/simd_conversions.c
+          for n in 166 168; do
+            sed -n "${n}p" "$F" | grep -q 'simd_saturate(comp_ctx, func_ctx, e_sat_i16x8' \
+              || { echo "La linea $n no es la esperada:"; sed -n "${n}p" "$F"; exit 1; }
+          done
+          sed -i '166s/e_sat_i16x8/itype/;168s/e_sat_i16x8/itype/' "$F"
+
+      - name: Compilar wamrc
+        run: |
+          V="${{ inputs.llvm_version }}"
+          mkdir -p wamr/core/deps/llvm/build
+          cmake -S wamr/wamr-compiler -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="/usr/lib/llvm-${V}/lib/cmake/llvm"
+          cmake --build build -j2
+          echo "WAMRC=$PWD/build/wamrc" >> "$GITHUB_ENV"
+          "$PWD/build/wamrc" --help > wamrc_help.txt 2>&1 || true
+
+      - name: Medir (tope 12 min y 13 GB de RAM)
+        timeout-minutes: 25
+        run: |
+          N="${{ matrix.name }}"; P="${{ matrix.pct }}"; X="${{ matrix.extra }}"
+          : > "medir_$N.txt"
+          for t in $X; do
+            f="${t%%=*}"
+            grep -q -- "$f" wamrc_help.txt || { echo "--- $N: flag inexistente en este wamrc: $f (omitido)" | tee -a "medir_$N.txt"; exit 0; }
+          done
+          python3 trim_wasm.py pes13_noeh.wasm muestra.wasm "$P" | tee -a "medir_$N.txt"
+          LIM_KB=$(( 13 * 1024 * 1024 ))
+          : > "mem_$N.log"
+          ( T=0
+            while true; do
+              PID=$(pgrep -x wamrc | head -1)
+              if [ -n "$PID" ]; then
+                L="$(date +%T) $(grep -E 'VmPeak|VmHWM|VmSwap' /proc/$PID/status | tr -s ' ' | tr '\n' ' ')"
+                echo "$L" >> "mem_$N.log"
+                if [ $((T % 15)) -eq 0 ]; then echo "[$N] $L"; fi
+                RSS=$(awk '/VmRSS/{print $2}' /proc/$PID/status 2>/dev/null)
+                if [ "${RSS:-0}" -gt "$LIM_KB" ]; then
+                  echo "[$N] CORTADO: RAM > 13 GB" | tee -a "medir_$N.txt"
+                  kill -9 "$PID"
+                fi
+              fi
+              T=$((T+1)); sleep 2
+            done ) &
+          MP=$!
+          set +e
+          /usr/bin/time -v -o "time_$N.txt" timeout -k 10 12m \
+            "$WAMRC" --target=aarch64 --opt-level=0 ${{ inputs.extra_flags }} $X \
+            -o muestra.aot muestra.wasm > "wamrc_$N.log" 2>&1
+          RC=$?
+          set -e
+          kill $MP 2>/dev/null || true
+          {
+            echo "--- $N pct=$P extra='$X' rc=$RC (124=tiempo 12min, 137=RAM)"
+            grep -E "Elapsed|Maximum resident" "time_$N.txt" || true
+            tail -1 "mem_$N.log" || true
+            ls -l muestra.aot 2>/dev/null || echo "sin .aot"
+            grep -ciE 'error|fail|unsupported' "wamrc_$N.log" | sed 's/^/lineas error: /'
+            grep -iE 'error|fail|unsupported' "wamrc_$N.log" | head -5 || true
+          } | tee -a "medir_$N.txt"
+          cat "medir_$N.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: medir-j-${{ matrix.name }}
+          path: |
+            medir_*.txt
+            time_*.txt
+            mem_*.log
+            wamrc_*.log
+          retention-days: 5
+          if-no-files-found: ignore
