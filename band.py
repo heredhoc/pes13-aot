@@ -5,7 +5,8 @@ Uso:
   python3 band.py info  in.wasm [BASE_PCT BAND_PCT]          (defecto 24 28; lista las mayores de la banda)
   python3 band.py trim  in.wasm out.wasm BASE_PCT BAND_PCT top:N|notop:N
      top:N   = base + SOLO las N funciones mas grandes de la banda
-     notop:N = base + toda la banda MENOS las N mas grandes"""
+     notop:N = base + toda la banda MENOS las N mas grandes
+  python3 band.py ranges in.wasm out.wasm "0-24,28-32"     (conserva funciones con bucket en esos rangos de %)"""
 import sys
 def rleb(d, p):
     r = s = 0
@@ -99,6 +100,17 @@ if sys.argv[1] == 'info':
     for lo in range(0, 100, 4):
         ids = band(funcs, lo, lo + 4)
         if ids: print(f'{lo}-{lo+4}: {len(ids)} {sum(funcs[i][2] for i in ids)} max={max(funcs[i][2] for i in ids)}')
+elif sys.argv[1] == 'ranges':
+    d, secs, (hdr, pay, end), funcs = load(sys.argv[2])
+    rg = [tuple(float(x) for x in r.split('-')) for r in sys.argv[4].split(',')]
+    STUB = wleb(3) + b'\x00\x00\x0b'
+    parts = [wleb(len(funcs))]; kept = kb = 0
+    for i, (s_, e, fsz, nl) in enumerate(funcs):
+        k = any(lo * 10 <= bucket(i) < hi * 10 for lo, hi in rg)
+        parts.append(d[s_:e] if k else STUB); kept += k; kb += fsz if k else 0
+    newpay = b''.join(parts)
+    open(sys.argv[3], 'wb').write(d[:hdr] + bytes([10]) + wleb(len(newpay)) + newpay + d[end:])
+    print(f'rangos {sys.argv[4]}: funciones {kept}/{len(funcs)}, bytes de codigo {kb}')
 else:
     d, secs, (hdr, pay, end), funcs = load(sys.argv[2])
     dst, base, hi, mode = sys.argv[3], float(sys.argv[4]), float(sys.argv[5]), sys.argv[6]
