@@ -1,0 +1,140 @@
+name: AOT PES13 funcion culpable (p)
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra_flags:
+        description: 'Flags base para wamrc'
+        required: false
+        default: "--enable-indirect-mode --disable-llvm-intrinsics --disable-llvm-lto --enable-llvm-passes='function(mem2reg,instcombine<no-verify-fixpoint>,simplifycfg)'"
+      func_idx:
+        description: 'Indice de funcion (seccion Code) a aislar'
+        required: false
+        default: '24070'
+      func_name:
+        description: 'Nombre de la funcion'
+        required: false
+        default: 'L_01169990'
+      wasm_url:
+        description: 'URL del wasm.br'
+        required: false
+        default: 'https://pes13.optijuegos.net/assets/pes13.wasm.br'
+      wamr_tag:
+        description: 'Tag de WAMR'
+        required: false
+        default: 'WAMR-2.4.5'
+      llvm_version:
+        description: 'Version de LLVM de apt'
+        required: false
+        default: '18'
+
+jobs:
+  mirar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Desensamblar la funcion
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq wabt brotli
+          curl -fsSL -o pes13.wasm.br "${{ inputs.wasm_url }}"
+          brotli -df pes13.wasm.br -o pes13.wasm
+          python3 patch_eh.py pes13.wasm pes13_noeh.wasm
+          python3 band.py only pes13_noeh.wasm solo.wasm "${{ inputs.func_idx }}" | tee funcion.txt
+          wasm-objdump -d solo.wasm > solo_dis.txt 2>&1 || true
+          awk '/func\[[0-9]+\]/{p=($0 ~ /<${{ inputs.func_name }}>:/)} p' solo_dis.txt | head -400 > funcion_dis.txt || true
+          touch funcion_dis.txt
+          cat funcion.txt funcion_dis.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: medir-p-func
+          path: |
+            funcion.txt
+            funcion_dis.txt
+          retention-days: 5
+          if-no-files-found: ignore
+
+  medir:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [base, nopasses, nointrin, noindirect, o1, size1]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Info del runner
+        run: |
+          nproc
+          free -h
+          df -h .
+
+      - name: Instalar dependencias
+        run: |
+          V="${{ inputs.llvm_version }}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "llvm-${V}-dev" cmake ninja-build build-essential \
+            zlib1g-dev libzstd-dev libedit-dev libxml2-dev wabt brotli gdb
+
+      - name: Bajar y descomprimir wasm
+        run: |
+          curl -fsSL -o pes13.wasm.br "${{ inputs.wasm_url }}"
+          brotli -df pes13.wasm.br -o pes13.wasm
+          [ "$(stat -c %s pes13.wasm)" = 89614031 ] || echo "AVISO: tamano distinto al analizado (89614031)"
+          python3 patch_eh.py pes13.wasm pes13_noeh.wasm
+          ls -l pes13_noeh.wasm
+
+      - name: Clonar WAMR y aplicar parche SIMD
+        run: |
+          git clone --depth 1 --branch "${{ inputs.wamr_tag }}" \
+            https://github.com/bytecodealliance/wasm-micro-runtime wamr
+          F=wamr/core/iwasm/compilation/simd/simd_conversions.c
+          for n in 166 168; do
+            sed -n "${n}p" "$F" | grep -q 'simd_saturate(comp_ctx, func_ctx, e_sat_i16x8' \
+              || { echo "La linea $n no es la esperada:"; sed -n "${n}p" "$F"; exit 1; }
+          done
+          sed -i '166s/e_sat_i16x8/itype/;168s/e_sat_i16x8/itype/' "$F"
+
+      - name: Compilar wamrc
+        run: |
+          V="${{ inputs.llvm_version }}"
+          mkdir -p wamr/core/deps/llvm/build
+          cmake -S wamr/wamr-compiler -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="/usr/lib/llvm-${V}/lib/cmake/llvm"
+          cmake --build build -j2
+          echo "WAMRC=$PWD/build/wamrc" >> "$GITHUB_ENV"
+          "$PWD/build/wamrc" --help > wamrc_help.txt 2>&1 || true
+
+      - name: Probar la funcion sola (corte a 10 GB, tope 10 min)
+        timeout-minutes: 20
+        run: |
+          N="${{ matrix.name }}"
+          B1="--enable-indirect-mode"; B2="--disable-llvm-intrinsics"; B3="--disable-llvm-lto"
+          B4="--enable-llvm-passes='function(mem2reg,instcombine<no-verify-fixpoint>,simplifycfg)'"
+          case "$N" in
+            base)       F="$B1 $B2 $B3 $B4" ;;
+            nopasses)   F="$B1 $B2 $B3" ;;
+            nointrin)   F="$B1 $B3 $B4" ;;
+            noindirect) F="$B2 $B3 $B4" ;;
+            o1)         F="$B1 $B2 $B3 $B4 --opt-level=1" ;;
+            size1)      F="$B1 $B2 $B3 $B4 --size-level=1" ;;
+          esac
+          python3 band.py only pes13_noeh.wasm solo.wasm "${{ inputs.func_idx }}" > /dev/null
+          export FLAGS="$F" LIM_KB=$(( 10 * 1024 * 1024 ))
+          if [ "$N" = base ]; then python3 -u probar.py solo.wasm "$N" --gdb; else python3 -u probar.py solo.wasm "$N"; fi
+          cat "resultado_$N.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: medir-p-${{ matrix.name }}
+          path: |
+            resultado_*.txt
+            wamrc_*.log
+            gdb_*.txt
+          retention-days: 5
+          if-no-files-found: ignore

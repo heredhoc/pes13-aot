@@ -6,6 +6,7 @@ Uso:
   python3 band.py trim  in.wasm out.wasm BASE_PCT BAND_PCT top:N|notop:N
      top:N   = base + SOLO las N funciones mas grandes de la banda
      notop:N = base + toda la banda MENOS las N mas grandes
+  python3 band.py only in.wasm out.wasm IDX     (solo esa funcion; imprime su cuerpo en hex)
   python3 band.py ranges in.wasm out.wasm "0-24,28-32"     (conserva funciones con bucket en esos rangos de %)"""
 import sys
 def rleb(d, p):
@@ -101,6 +102,17 @@ def main():
         for lo in range(0, 100, 4):
             ids = band(funcs, lo, lo + 4)
             if ids: print(f'{lo}-{lo+4}: {len(ids)} {sum(funcs[i][2] for i in ids)} max={max(funcs[i][2] for i in ids)}')
+    elif sys.argv[1] == 'only':
+        d, secs, (hdr, pay, end), funcs = load(sys.argv[2])
+        k = int(sys.argv[4])
+        STUB = wleb(3) + b'\x00\x00\x0b'
+        parts = [wleb(len(funcs))] + [d[a:b] if i == k else STUB for i, (a, b, fsz, nl) in enumerate(funcs)]
+        newpay = b''.join(parts)
+        open(sys.argv[3], 'wb').write(d[:hdr] + bytes([10]) + wleb(len(newpay)) + newpay + d[end:])
+        a, b, fsz, nl = funcs[k]
+        print(f'idx {k}: {fsz} bytes de cuerpo, {nl} locales; hex del cuerpo:')
+        body = d[a:b]
+        for o in range(0, len(body), 32): print(body[o:o+32].hex(' '))
     elif sys.argv[1] == 'ranges':
         d, secs, (hdr, pay, end), funcs = load(sys.argv[2])
         rg = [tuple(float(x) for x in r.split('-')) for r in sys.argv[4].split(',')]
