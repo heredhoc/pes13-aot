@@ -1,4 +1,4 @@
-name: AOT PES13 (prueba de compilacion)
+name: AOT PES13 (prueba de compilacion, sin EH)
 
 on:
   workflow_dispatch:
@@ -33,6 +33,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 340
     steps:
+      - uses: actions/checkout@v4
+
       - name: Info del runner
         run: |
           nproc
@@ -73,7 +75,10 @@ jobs:
           head -c 8 pes13.wasm | od -An -tx1
           sha256sum pes13.wasm
           [ "$(stat -c %s pes13.wasm)" = 89614031 ] || echo "AVISO: tamano distinto al analizado (89614031)"
-          echo "WASM=pes13.wasm" >> "$GITHUB_ENV"
+          python3 patch_eh.py pes13.wasm pes13_noeh.wasm
+          ls -l pes13_noeh.wasm
+          sha256sum pes13_noeh.wasm
+          echo "WASM=pes13_noeh.wasm" >> "$GITHUB_ENV"
 
       - name: Clonar WAMR y aplicar parche SIMD
         run: |
